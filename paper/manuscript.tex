@@ -1,0 +1,155 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{amsmath,amsfonts,amssymb}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{hyperref}
+\usepackage{geometry}
+\usepackage{authblk}
+\usepackage{natbib}
+\usepackage{caption}
+\usepackage{subcaption}
+\geometry{margin=1in}
+
+\title{Predicting Citations in Neuroblastoma Research: \\ A Temporally-Aware Machine Learning Approach}
+\author[1]{Author Name}
+\affil[1]{Institution}
+\date{\today}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+Predicting citation dynamics is a central challenge in the science of science. Recent models have demonstrated high predictive accuracy by combining network science features with machine learning. However, many of these models suffer from temporal data leakage—calculating features such as co-authorship distance or node prestige using data from the future relative to the publication date of the citing paper. In this study, we present a temporally-aware citation prediction framework that strictly enforces temporal causality. We apply this framework to a comprehensive dataset of 51,652 articles on neuroblastoma published between 1975 and 2023, extracted from Dimensions.ai. We engineer features representing prestige, social proximity (co-authorship network distance), semantic similarity (via SBERT embeddings), and temporal distance, computing all network and prestige features using only data available prior to the citing year. Comparing six machine learning models on a balanced dataset of 529,902 temporally valid citation pairs, we find that a Neural Network achieves the highest performance (ROC-AUC = 0.9719). SHAP value analysis reveals that semantic similarity and the prestige of the cited paper are the strongest predictors of citation, while social proximity plays a significant but secondary role. Ablation studies confirm that the combination of semantic and network features is essential for optimal performance. Our results demonstrate that high predictive accuracy in citation dynamics can be achieved without relying on future information, providing a robust methodological foundation for future science of science research.
+\end{abstract}
+
+\section{Introduction}
+The dynamics of scientific citations reflect the flow of knowledge, the structure of scientific communities, and the mechanisms of academic recognition \citep{Wang2013, Fortunato2018}. Understanding and predicting which papers will cite which others is a fundamental problem in the science of science, with implications for literature search, research evaluation, and the sociology of science \citep{Zeng2017}.
+
+Traditionally, citation prediction has been approached through network science, utilizing mechanisms such as preferential attachment (the ``Matthew effect'') \citep{Barabasi1999, Merton1968} or social proximity in co-authorship networks \citep{Newman2001}. More recently, the availability of large-scale bibliographic datasets and advances in natural language processing have enabled machine learning approaches that combine structural network features with semantic content \citep{Chakraborty2015, Shibata2012}.
+
+However, a critical methodological flaw affects many recent citation prediction studies: temporal data leakage. In predicting whether paper $A$ (published in year $t_A$) cites paper $B$ (published in year $t_B$, where $t_B \le t_A$), features such as the co-authorship distance between the authors of $A$ and $B$, or the total citation count of $B$, are often computed using the entire static network spanning the full dataset period (e.g., up to 2023). This allows the model to ``see the future''—learning from co-authorship links or citations that did not exist at time $t_A$. This leakage artificially inflates model performance and invalidates claims about the predictive power of social or prestige mechanisms. Furthermore, negative sampling in these studies often ignores temporal constraints, pairing citing papers with ``cited'' papers published in the future, making the classification task artificially easy.
+
+In this paper, we address these methodological criticisms directly. We propose a strictly temporally-aware framework for citation prediction. We construct a dataset of 529,902 citation pairs (positive and negative) from a corpus of 51,652 neuroblastoma research articles (1975--2023) retrieved from Dimensions.ai. We compute all network and prestige features incrementally, ensuring that for any citing paper published in year $t$, the features are derived solely from the network state up to year $t-1$.
+
+We evaluate six machine learning algorithms—Logistic Regression, Linear SVM, k-Nearest Neighbors, Random Forest, Gradient Boosting, and Neural Networks—on this temporally valid dataset. We utilize SHapley Additive exPlanations (SHAP) to interpret the interaction of semantic, social, and prestige features, and conduct ablation studies to quantify the contribution of each feature class.
+
+\section{Data and Methodology}
+
+\subsection{Dataset Extraction}
+We utilize a dataset extracted from the Dimensions.ai database \citep{Herzog2020}. We queried the database for publications containing the keyword ``neuroblastoma'' in the title or abstract, published between 1975 and 2023. The initial extraction yielded 54,857 records. We filtered this dataset to include only peer-reviewed journal articles with valid publication years, resulting in a final corpus of 51,652 articles. The dataset includes comprehensive metadata: titles, abstracts, authors, publication dates, journal information, and reference lists. Figure \ref{fig:pubs_per_year} shows the exponential growth of neuroblastoma literature over the study period.
+
+\begin{figure}[htbp]
+    \centering
+    \includegraphics[width=0.8\textwidth]{figures/fig1_publications_per_year.pdf}
+    \caption{Number of neuroblastoma research articles published per year (1975--2023).}
+    \label{fig:pubs_per_year}
+\end{figure}
+
+\subsection{Citation Pair Construction and Negative Sampling}
+The fundamental task is binary classification: given a pair of papers $(A, B)$, predict whether $A$ cites $B$. To ensure temporal validity, we enforce the constraint that $t_B \le t_A$.
+
+\textbf{Positive Pairs:} We extracted all observed citations within our corpus where both the citing and cited papers exist in our dataset. This yielded 264,951 positive citation pairs.
+
+\textbf{Negative Pairs:} To create a balanced dataset, we generated an equal number of negative pairs (264,951). Crucially, we enforced strict temporal causality during negative sampling. For each positive pair $(A, B)$, we generated a negative pair $(A, B')$ by randomly selecting a paper $B'$ from the pool of all papers published in or before year $t_A$, ensuring that $A$ does not actually cite $B'$. This guarantees that the negative examples represent temporally possible but unrealized citations, preventing the model from trivially distinguishing pairs based on impossible temporal orderings.
+
+\subsection{Temporally-Aware Feature Engineering}
+We engineered seven features categorized into semantic, network/social, prestige, and metadata classes. All features that depend on the state of the literature (prestige and co-authorship) were computed using a strictly causal rolling window.
+
+\begin{enumerate}
+    \item \textbf{Semantic Similarity ($S_{sem}$):} We utilized Sentence-BERT (SBERT) \citep{Reimers2019} to encode the title and abstract of each paper into a 384-dimensional dense vector. The semantic similarity between paper $A$ and $B$ is the cosine similarity of their SBERT embeddings.
+    \item \textbf{Temporal Distance ($\Delta t$):} The difference in publication years, $\Delta t = t_A - t_B$.
+    \item \textbf{Co-authorship Distance ($D_{soc}$):} We constructed a cumulative co-authorship network. For a citing paper $A$ published in year $t_A$, we used the co-authorship network constructed from all papers published up to year $t_A - 1$. The social distance is the shortest path (Dijkstra's algorithm) between any author of $A$ and any author of $B$ in this temporally restricted network. If no path exists, the distance is capped at 20.
+    \item \textbf{Prestige of Cited Paper ($P_{cited}$):} The total number of citations received by paper $B$ from papers published up to year $t_A - 1$. To handle the heavy-tailed distribution, we apply a $\log(1 + x)$ transformation.
+    \item \textbf{Prestige of Citing Paper ($P_{citing}$):} The maximum cumulative citation count (up to year $t_A - 1$) of any author of paper $A$. This captures the prominence of the citing team.
+    \item \textbf{Same Journal ($I_{journal}$):} A binary indicator (1 if $A$ and $B$ are published in the same journal, 0 otherwise).
+    \item \textbf{Open Access ($I_{oa}$):} A binary indicator of whether paper $B$ is Open Access.
+\end{enumerate}
+
+Figure \ref{fig:feature_dist} illustrates the distributions of these features for positive and negative pairs.
+
+\begin{figure}[htbp]
+    \centering
+    \includegraphics[width=0.9\textwidth]{figures/fig3_feature_distributions.pdf}
+    \caption{Distributions of key features for cited (positive) and not-cited (negative) pairs. All network and prestige features are computed strictly causally.}
+    \label{fig:feature_dist}
+\end{figure}
+
+\section{Results}
+
+\subsection{Model Performance}
+We evaluated six machine learning models using 5-fold stratified cross-validation on the balanced dataset of 529,902 pairs. The models were evaluated using Area Under the Receiver Operating Characteristic Curve (ROC-AUC), F1-score, precision, recall, and accuracy. 
+
+Table \ref{tab:results} and Figure \ref{fig:model_comp} summarize the performance. The Neural Network (Multilayer Perceptron) achieved the highest performance with an average ROC-AUC of 0.9719 and an F1-score of 0.9129, closely followed by Gradient Boosting. The strong performance of non-linear models indicates the presence of complex interactions between the semantic and structural features. Notably, even with strict temporal leakage prevention, the models achieve exceptional predictive accuracy, confirming that citation dynamics are highly predictable from historical network and semantic states.
+
+\begin{table}[htbp]
+\centering
+\caption{Model Performance (5-Fold Cross-Validation Mean $\pm$ Standard Deviation)}
+\label{tab:results}
+\begin{tabular}{lccccc}
+\toprule
+\textbf{Model} & \textbf{ROC-AUC} & \textbf{F1-Score} & \textbf{Accuracy} & \textbf{Precision} & \textbf{Recall} \\
+\midrule
+Neural Network & \textbf{0.9719 $\pm$ 0.0004} & \textbf{0.9129 $\pm$ 0.0007} & \textbf{0.9130 $\pm$ 0.0008} & 0.9138 $\pm$ 0.0032 & \textbf{0.9120 $\pm$ 0.0031} \\
+Gradient Boosting & 0.9717 $\pm$ 0.0005 & 0.9129 $\pm$ 0.0009 & 0.9130 $\pm$ 0.0009 & \textbf{0.9142 $\pm$ 0.0016} & 0.9116 $\pm$ 0.0013 \\
+Random Forest & 0.9689 $\pm$ 0.0005 & 0.9106 $\pm$ 0.0008 & 0.9107 $\pm$ 0.0009 & 0.9112 $\pm$ 0.0015 & 0.9100 $\pm$ 0.0013 \\
+Logistic Regression & 0.9670 $\pm$ 0.0005 & 0.9059 $\pm$ 0.0010 & 0.9057 $\pm$ 0.0010 & 0.9036 $\pm$ 0.0017 & 0.9082 $\pm$ 0.0010 \\
+Linear SVM & 0.9670 $\pm$ 0.0005 & 0.9059 $\pm$ 0.0010 & 0.9057 $\pm$ 0.0011 & 0.9037 $\pm$ 0.0017 & 0.9082 $\pm$ 0.0011 \\
+k-NN (k=5) & 0.9502 $\pm$ 0.0008 & 0.9019 $\pm$ 0.0009 & 0.9019 $\pm$ 0.0010 & 0.9022 $\pm$ 0.0017 & 0.9015 $\pm$ 0.0015 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{figure}[htbp]
+    \centering
+    \begin{minipage}{0.48\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{figures/fig4_model_comparison.pdf}
+        \caption{ROC-AUC comparison across models.}
+        \label{fig:model_comp}
+    \end{minipage}\hfill
+    \begin{minipage}{0.48\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{figures/fig5_roc_curves.pdf}
+        \caption{ROC curves for top performing models.}
+        \label{fig:roc_curves}
+    \end{minipage}
+\end{figure}
+
+\subsection{Feature Importance and Explainability}
+To understand the drivers of citation, we computed SHAP (SHapley Additive exPlanations) values for the best-performing Neural Network model (Figure \ref{fig:shap}).
+
+The analysis reveals that Semantic Similarity is the most important predictor of citation. Papers that are conceptually close (high cosine similarity of SBERT embeddings) are vastly more likely to be cited. The second most important feature is the Prestige of the Cited Paper ($P_{cited}$), confirming the robust presence of preferential attachment (the Matthew effect) in the neuroblastoma literature. Temporal Distance is the third most important, reflecting the natural decay of citation probability as papers age. Co-authorship Distance ($D_{soc}$) ranks fourth; while social proximity increases citation likelihood, it is less dominant than semantic relevance or established prestige.
+
+\begin{figure}[htbp]
+    \centering
+    \includegraphics[width=0.7\textwidth]{figures/fig6_shap_importance.pdf}
+    \caption{Mean absolute SHAP values indicating global feature importance for the Neural Network model.}
+    \label{fig:shap}
+\end{figure}
+
+\subsection{Ablation Study}
+To rigorously quantify the contribution of different feature classes, we conducted an ablation study using the Random Forest model (Figure \ref{fig:ablation}). 
+
+Removing semantic similarity causes the most severe performance drop (AUC falls from 0.9683 to 0.8917), underscoring that content matters most. Removing prestige features also causes a significant drop (AUC falls to 0.9090). Interestingly, models trained on isolated feature subsets perform poorly: Semantic similarity alone yields an AUC of 0.8491, and Network features alone (co-authorship + prestige) yield 0.8388. It is the \textit{combination} of what a paper is about (semantics) and who wrote it / how famous it is (network/prestige) that enables highly accurate prediction.
+
+\begin{figure}[htbp]
+    \centering
+    \includegraphics[width=0.7\textwidth]{figures/fig7_ablation.pdf}
+    \caption{Ablation study showing ROC-AUC for various feature subsets.}
+    \label{fig:ablation}
+\end{figure}
+
+\section{Discussion and Conclusion}
+In this study, we addressed a critical methodological weakness in recent citation dynamics literature: temporal data leakage. By strictly enforcing causal boundaries—computing co-authorship graphs and citation counts using only data available prior to the citing paper's publication, and employing temporally valid negative sampling—we provide a robust assessment of citation predictability.
+
+Applying this framework to 50 years of neuroblastoma research (51,652 articles), we demonstrate that citations are highly predictable (ROC-AUC > 0.97) even when temporal leakage is eliminated. Our SHAP and ablation analyses reveal that while the Matthew effect (prestige) and social proximity (co-authorship networks) are significant drivers of citation behavior, semantic relevance (content similarity) is the dominant factor. The highest predictive accuracy is achieved only when structural network features and deep semantic embeddings are combined.
+
+These findings validate the integration of network science and natural language processing in the science of science, while establishing a rigorous, temporally-aware methodological standard for future predictive modeling in bibliometrics.
+
+\bibliographystyle{plainnat}
+\bibliography{references}
+
+\end{document}
